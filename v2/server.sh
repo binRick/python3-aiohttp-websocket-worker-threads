@@ -1,5 +1,5 @@
 #!/bin/bash
-INSTALL="1"
+INSTALL="0"
 cd $(cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )
 command python3 --version >/dev/null 2>&1 || {
     echo python3 not found in path
@@ -19,7 +19,7 @@ source .venv/bin/activate
 if [ "$INSTALL" == "1" ]; then
     pip install pip --upgrade
     pip install async colorclass pyopenssl werkzeug halo async_timeout jinja2 cryptography \
-        psutil aiodns ujson msgpack pendulum aiohttp-sse pyte colorlog \
+        psutil aiodns ujson msgpack pendulum aiohttp-sse pyte colorlog jsonlog \
         aiohttp_session aiomysql aiocache aiohttp aiohttp_jwt aiohttp_session[secure] aiohttp-jinja2
     pip freeze
 fi

@@ -1,4 +1,5 @@
-import os, sys, json, time, subprocess, base64, ssl, pprint, socket, traceback, asyncio, aiohttp.web, logging, jwt, OpenSSL, threading, halo, colorclass, jinja2, aiohttp_jinja2, aiomysql, psutil, aiodns, pyte, pathlib, signal, shlex, pty, select
+import os, sys, json, time, subprocess, base64, ssl, pprint, socket, traceback, asyncio, aiohttp.web, logging, jwt, OpenSSL, threading, halo, colorclass, jinja2, aiohttp_jinja2, aiomysql, psutil, aiodns, pyte, pathlib, signal, shlex, pty, select, colorlog, jsonlog
+from colorlog import ColoredFormatter
 from aiohttp_sse import sse_response
 from datetime import datetime
 from aiocache import cached, Cache
@@ -14,7 +15,59 @@ _DEBUG_WEBSERVER_REQUESTS = True
 _DEBUG_WEBSERVER_RESPONSES = True
 _DEBUG_VERBOSE = True
 
+
+jsonlog.basicConfig(
+    level=jsonlog.INFO,
+    indent=None,
+    keys=("timestamp", "level", "message"),
+    timespec="auto",
+    filename="{}/{}".format(os.path.realpath(os.path.dirname(os.path.abspath(__file__))),'access.log'),
+    # filemode="a",
+    # stream=None,
+)
+
+logging.warning("User clicked a button", extra={"user": 123})
+
+"""
+TRACE = 5
+logging.addLevelName(TRACE, 'TRACE')
+formatter = colorlog.ColoredFormatter(log_colors={'TRACE': 'yellow'})
+
+logger.setLevel('TRACE')
+logger.log(TRACE, 'a message using a custom level')
+logger = logging.getLogger('example')
+logger.addHandler(handler)
+logger.setLevel('TRACE')
+logger.log(TRACE, 'a message using a custom level')
+"""
+
+"""
 logging.basicConfig(level=logging.DEBUG)
+handler = colorlog.StreamHandler()
+handler.setFormatter(colorlog.ColoredFormatter(
+	'%(log_color)s%(levelname)s:%(name)s:%(message)s'))
+
+formatter = ColoredFormatter(
+	"%(log_color)s%(levelname)-8s%(reset)s %(blue)s%(message)s",
+	datefmt=None,
+	reset=True,
+	log_colors={
+		'DEBUG':    'cyan',
+		'INFO':     'green',
+		'WARNING':  'yellow',
+		'ERROR':    'red',
+		'CRITICAL': 'red,bg_white',
+	},
+	secondary_log_colors={},
+	style='%'
+)
+handler = logging.StreamHandler()
+handler.setFormatter(formatter)
+logger = colorlog.getLogger('example')
+logger.addHandler(handler)
+logger.log(0, 'a message using a custom level')
+"""
+
 
 MAX_SUBSCRIPTIONS = 10
 SHARABLE_SECRET = 'xxxxxxxxxxxxxxxxxxxx'
@@ -167,6 +220,7 @@ async def jinja_handler(request):
     return response
 
 async def cached_handler_set(request):
+    logging.warning("User clicked a button", extra={"user": 123})
     server_id = int(request.match_info['server_id'])
     await request.app["cache"].set("server_id", server_id)
     return aiohttp.web.Response(text='Cache Set!')
@@ -391,8 +445,8 @@ def initRoutes(app):
     app.router.add_route('GET', '/tests/sse/data', sse_data_handler)
     app.router.add_route('GET', '/tests/sse', sse_html_handler)
     app.router.add_route('GET', '/api/server/{server_id}', api_handler1)
-    app.router.add_route('GET', '/api/cache/set/server_id/{server_id}', cached_handler_set)
-    app.router.add_route('GET', '/api/cache/get/server_id', cached_handler_get)
+    app.router.add_route('GET', '/tests/cache/set/server_id/{server_id}', cached_handler_set)
+    app.router.add_route('GET', '/tests/cache/get/server_id', cached_handler_get)
     app.router.add_route('GET', '/ws/basic', websocket_handler_basic)
     app.router.add_route('GET', '/ws/terminal', websocket_handler_terminal)
     app.router.add_static("/", "{}/static".format(pathlib.Path(__file__).parent), show_index=True)
