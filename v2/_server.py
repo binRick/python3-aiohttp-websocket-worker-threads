@@ -21,7 +21,7 @@ jsonlog.basicConfig(
     indent=None,
     keys=("timestamp", "level", "message"),
     timespec="auto",
-    filename="{}/{}".format(os.path.realpath(os.path.dirname(os.path.abspath(__file__))),'access.log'),
+    #filename="{}/{}".format(os.path.realpath(os.path.dirname(os.path.abspath(__file__))),'access.log'),
     # filemode="a",
     # stream=None,
 )
@@ -152,6 +152,7 @@ async def on_shutdown(app):
             pass
 
 
+logging.warning("[cached_handler_get]",extra={"server_id": 123})
 
 
 def initApp():
@@ -227,6 +228,7 @@ async def cached_handler_set(request):
 
 async def cached_handler_get(request):
     server_id = await request.app["cache"].get("server_id")
+    logging.warning("[cached_handler_get]",extra={"server_id": server_id})
     return aiohttp.web.Response(text='Cache={}'.format(server_id))
     
 async def cached_handler(request):

@@ -23,5 +23,5 @@ if [ "$INSTALL" == "1" ]; then
         aiohttp_session aiomysql aiocache aiohttp aiohttp_jwt aiohttp_session[secure] aiohttp-jinja2
     pip freeze
 fi
-
+clear
 exec python3 _server.py 2>&1
