@@ -5,6 +5,7 @@ window.onload = () => {
 
     let socket;
     function connect() {
+        //socket = new WebSocket(`ws://${window.location.host}/ws`);
         //socket = new WebSocket(`ws://${window.location.host}/ws/terminal`);
         socket = new WebSocket(`ws://${window.location.host}/ws/basic`);
         socket.onmessage = e => terminal.update(JSON.parse(e.data));
