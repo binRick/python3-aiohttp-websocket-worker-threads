@@ -1,0 +1,14 @@
+<html>
+hello {{name}} {{surname}}
+
+{%if last_visit is defined and last_visit %}
+    <br/>
+    your last visit was {{last_visit}}
+{%endif%}
+
+{%if server_id is defined and server_id|int > 0 %}
+    <br/>
+    you asked for server_id {{server_id}}
+{%endif%}
+
+</html>
