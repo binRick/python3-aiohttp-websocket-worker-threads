@@ -1,4 +1,4 @@
-import os, sys, json, time, subprocess, base64, ssl, pprint, socket, traceback, asyncio, aiohttp.web, logging, jwt, OpenSSL, threading, halo, colorclass, jinja2, aiohttp_jinja2, aiomysql, psutil, aiodns, pyte, pathlib, signal, shlex, pty
+import os, sys, json, time, subprocess, base64, ssl, pprint, socket, traceback, asyncio, aiohttp.web, logging, jwt, OpenSSL, threading, halo, colorclass, jinja2, aiohttp_jinja2, aiomysql, psutil, aiodns, pyte, pathlib, signal, shlex, pty, select
 from aiohttp_sse import sse_response
 from datetime import datetime
 from aiocache import cached, Cache
@@ -13,16 +13,19 @@ from aiohttp_session.cookie_storage import EncryptedCookieStorage
 _DEBUG_WEBSERVER_REQUESTS = True
 _DEBUG_WEBSERVER_RESPONSES = True
 _DEBUG_VERBOSE = True
-sharable_secret = 'secret'
 
 logging.basicConfig(level=logging.DEBUG)
+
+MAX_SUBSCRIPTIONS = 10
+SHARABLE_SECRET = 'xxxxxxxxxxxxxxxxxxxx'
 THREAD_INTERVAL = 5.0
-CHECK_WEBSOCKETS_INTERVAL = 5.0
+CHECK_WEBSOCKETS_INTERVAL = 10.0
 HOST = os.getenv('HOST', '0.0.0.0')
 PORT = int(os.getenv('PORT', 50009))
 STATIC_PATH = "{}/static".format(os.path.dirname(os.path.realpath(__file__)))
 TEMPLATE_PATH = "{}/templates".format(os.path.dirname(os.path.realpath(__file__)))
-thisProcess = psutil.Process()
+THIS_PROCESS = psutil.Process()
+IS_SHUTTING_DOWN = False
 
 WEBSOCKET_PUBLISH_TYPES = {
   "backgroundProcessorEvents": set(),
@@ -40,11 +43,69 @@ SUBSCRIPTION_THREAD_CLASSES = {
   "backgroundProcessorEvents": 'BackgroundProcessorEventsThread',
 }
 
+
+class Terminal:
+    def __init__(self, columns, lines, p_in):
+        self.screen = pyte.HistoryScreen(columns, lines)
+        self.screen.set_mode(pyte.modes.LNM)
+        self.screen.write_process_input = \
+            lambda data: p_in.write(data.encode())
+        self.stream = pyte.ByteStream()
+        self.stream.attach(self.screen)
+
+    def feed(self, data):
+        self.stream.feed(data)
+
+    def dumps(self):
+        cursor = self.screen.cursor
+        lines = []
+        for y in self.screen.dirty:
+            line = self.screen.buffer[y]
+            data = [(char.data, char.reverse, char.fg, char.bg)
+                    for char in (line[x] for x in range(self.screen.columns))]
+            lines.append((y, data))
+
+        self.screen.dirty.clear()
+        print("returning {} lines".format(len(lines)))
+        return json.dumps({"c": (cursor.x, cursor.y), "lines": lines})
+
+
+
+
+def open_terminal(command="bash", columns=80, lines=24):
+    p_pid, master_fd = pty.fork()
+    if p_pid == 0:  # Child.
+        argv = shlex.split(command)
+        env = dict(TERM="linux", LC_ALL="en_GB.UTF-8",COLUMNS=str(columns), LINES=str(lines))
+        os.execvpe(argv[0], argv, env)
+
+    # File-like object for I/O with the child process aka command.
+    p_out = os.fdopen(master_fd, "w+b", 0)
+    return Terminal(columns, lines, p_out), p_pid, p_out
+
+
+
+
+
+async def on_shutdown(app):
+    """Closes all WS connections on shutdown."""
+    global IS_SHUTTING_DOWN
+    IS_SHUTTING_DOWN = True
+    for task in app["websockets"]:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+
+
 def initApp():
     app = web.Application(
         middlewares=[
             JWTMiddleware(
-                secret_or_pub_key=sharable_secret,
+                secret_or_pub_key=SHARABLE_SECRET,
                 token_getter=get_token,
                 request_property='user',
                 credentials_required=False,
@@ -61,7 +122,7 @@ def initApp():
     return app
 
 
-def initPerms():
+def initPerms(app):
     @check_permissions([
         'app/user:admin',
         'username:olehkuchuk',
@@ -92,7 +153,6 @@ async def sse_data_handler(request):
     async with sse_response(request) as resp:
         while True:
             data = 'Server Time : {}'.format(datetime.now())
-            print(data)
             await resp.send(data)
             await asyncio.sleep(1, loop=request.app.loop)
     return resp
@@ -101,7 +161,6 @@ async def jinja_handler(request):
     session = await get_session(request)
     last_visit = session['last_visit'] if 'last_visit' in session else None
     session['last_visit'] = time.time()
-    text = 'Last visited: {}'.format(last_visit)
     context = {'name': 'Andrew', 'surname': 'Svetlov', 'last_visit': last_visit}
     response = aiohttp_jinja2.render_template('index.html.j2',request,context)
     response.headers['Content-Language'] = 'ru'
@@ -162,7 +221,7 @@ async def get_token(request):
     return jwt.encode({
         'username': 'olehkuchuk',
         'scopes': ['username:olehkuchuk'],
-    }, sharable_secret)
+    }, SHARABLE_SECRET)
 
 
 """   Monitor Websockets and Subscriptions """
@@ -193,13 +252,55 @@ async def testhandle(request):
     session = await get_session(request)
     last_visit = session['last_visit'] if 'last_visit' in session else None
     session['last_visit'] = time.time()
-    text = 'Last visited: {}'.format(last_visit)
     return aiohttp.web.Response(text='Test handle')
 
+async def websocket_handler_terminal(request):
+    ws = aiohttp.web.WebSocketResponse()
+    await ws.prepare(request)
+    request.app["websockets"].add(ws)
 
-async def websocket_handler(request):
+    terminal, p_pid, p_out = open_terminal()
+    #ws.send_str(terminal.dumps())
+
+    def on_master_output():
+        terminal.feed(p_out.read(65536))
+        tout = terminal.dumps()
+        print("sending {} bytes of output: {}".format(len(tout), tout))
+        #ws.send_str(tout)
+        #request.app.loop.call_soon(ws.send_str, tout)
+
+    request.app.loop.add_reader(p_out, on_master_output)
+    try:
+        async for msg in ws:
+            print("{} byte msg: {}".format(len(msg), msg))
+            if msg.type == aiohttp.WSMsgType.TEXT:
+                if msg.data == pyte.control.ESC + "N":
+                    terminal.screen.next_page()
+                    await ws.send_str(terminal.dumps())
+                elif msg.data == pyte.control.ESC + "P":
+                    terminal.screen.prev_page()
+                    await ws.send_str(terminal.dumps())
+                else:
+                    _in = msg.data.encode()
+                    print("writing {}".format(_in))
+                    p_out.write(_in)
+            elif msg.type == aiohttp.WSMsgType.ERROR:
+                raise ws.exception()
+    except (asyncio.CancelledError, OSError):
+        pass
+    finally:
+        request.app.loop.remove_reader(p_out)
+        os.kill(p_pid, signal.SIGTERM)
+        p_out.close()
+        if not IS_SHUTTING_DOWN:
+            request.app["websockets"].remove(asyncio.Task.current_task())
+    await ws.close()
+    return ws
+
+
+async def websocket_handler_basic(request):
     logging.debug('Websocket connection starting')
-    if VERBOSE_DEBUG:
+    if _DEBUG_VERBOSE:
       logging.debug("method={},host={},path={},headers={},transport={},cookies={}".format(
                   request.method,
                   request.host,
@@ -208,14 +309,31 @@ async def websocket_handler(request):
                   request.transport,
                   request.cookies,
                 ))
-    clientIP = request.headers['X-Forwarded-For']
+
+    peername = request.transport.get_extra_info('peername')
+    client_host, client_port = peername
+    try:
+        clientIP = request.headers['X-Forwarded-For']
+    except Exception as e:
+        clientIP = client_host
+
     logging.debug("Client Request from {} with headers {}".format(clientIP, request.headers.keys()))
     ws = aiohttp.web.WebSocketResponse()
     await ws.prepare(request)
     request.app["websockets"].add(ws)
     logging.debug('Websocket connection ready')
+    terminal, p_pid, p_out = open_terminal()
+    #await ws.send_str(terminal.dumps())
+    def on_master_output():
+        terminal.feed(p_out.read(65536))
+        tout = terminal.dumps()
+        print("sending {} bytes of output: {}".format(len(tout), tout))
+        ws.send_str(tout)
+        #request.app.loop.call_soon(ws.send_str, tout)
+    request.app.loop.add_reader(p_out, on_master_output)
 
     async for msg in ws:
+        print("{} byte msg: {}".format(len(msg), msg))
         if msg.type == aiohttp.WSMsgType.TEXT:
             if msg.data == 'close':
                 await ws.close()
@@ -223,16 +341,24 @@ async def websocket_handler(request):
                 try:
                   clientResponseText = ''
                   message = msg.json()
-
+                  print("{} byte message: {}".format(len(message), message))
                   if 'subscribe' in message.keys():
                     logging.debug("Subscription Request: {}".format(message))
+
+                  _in = msg.data.encode()
+                  print("writing {}".format(_in))
+                  p_out.write(_in)
 
 
                 except (TypeError, ValueError):
                   message = msg.data
+
+                """
                 resp = "{}".format(message) + ' => {}'.format(clientResponseText)
-                ws.send_str(resp)
+                await ws.send_str(resp)
+                await ws.send_str(terminal.dumps())
                 message = msg.data
+                """
 
 
     logging.debug('Websocket connection closed')
@@ -256,11 +382,10 @@ def initThreads(app):
 
 def initRoutes(app):
     app.router.add_static('/static/', path=STATIC_PATH, name='static')
-    app.router.add_route('GET', '/', testhandle)
-    app.router.add_route('GET', '/ws', websocket_handler)
     app.router.add_route('GET', '/public', public_handler)
     app.router.add_route('GET', '/templateTest', jinja_handler)
     app.router.add_route('GET', '/protected', protected_handler)
+    app.router.add_route('GET', '/tests/one', testhandle)
     app.router.add_route('GET', '/tests/cached', cached_handler)
     app.router.add_route('GET', '/tests/sql', sql_handler)
     app.router.add_route('GET', '/tests/sse/data', sse_data_handler)
@@ -268,28 +393,38 @@ def initRoutes(app):
     app.router.add_route('GET', '/api/server/{server_id}', api_handler1)
     app.router.add_route('GET', '/api/cache/set/server_id/{server_id}', cached_handler_set)
     app.router.add_route('GET', '/api/cache/get/server_id', cached_handler_get)
+    app.router.add_route('GET', '/ws/basic', websocket_handler_basic)
+    app.router.add_route('GET', '/ws/terminal', websocket_handler_terminal)
+    app.router.add_static("/", "{}/static".format(pathlib.Path(__file__).parent), show_index=True)
 
 def initAppObjects(app):
     app["cache"] = Cache(Cache.MEMORY)
+    app["resolver"] = aiodns.DNSResolver(app.loop)
     app["websockets"] = set()
-    app["threads"] = {}
-    app["clientThreads"] = {}
     app["subscriptions"] = WEBSOCKET_SUBSCRIPTIONS
     app["publishTypes"] = WEBSOCKET_PUBLISH_TYPES
+    app["threads"] = {}
+    app["clientThreads"] = {}
     app["threadStops"] = {}
     app["clientThreadStops"] = {}
 
-def main():
-    loop = asyncio.get_event_loop()
-    resolver = aiodns.DNSResolver(loop=loop)
-    app = initApp()
-    initPerms()
-    initAppObjects(app)
+def initCleanups(app):
+    app.on_shutdown.append(on_shutdown)
 
+
+def main():
+    app = initApp()
+    initPerms(app)
+    initAppObjects(app)
     initRoutes(app)
     initThreads(app)
+    initCleanups(app)
 
-    aiohttp.web.run_app(app, host=HOST, port=PORT)
+    try:
+        aiohttp.web.run_app(app, host=HOST, port=PORT)
+    except Exception as e:
+        print(e)
+        sys.exit(1)
 
 if __name__ == '__main__':
     main()
